@@ -74,5 +74,42 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 基线预警重算（工作日 / 节假日 / 统一时区口径）
+
+旧口径直接按自然日相减，周末、月末与节假日偏移会提前判破线并产生重复预警，跨时区
+承诺时间也没有统一口径。现在改为从**基线承诺时间**与**依赖触发数据**重算，全平台只
+维护一份基线预警结果数据（内存表 `baseline_alert`），基线管理与依赖解析共享同一水位。
+
+- 规则引擎 `app/services/calendar_rules.py`
+  - 工作日规则、节假日、补班日按「规则批次」管理；同一日期多批次冲突时，以**到达时间
+    最晚**的生效批次为准（晚到依赖/规则修正早到口径），草稿批次不参与裁决。
+  - 所有时间对内统一转 UTC 比较、对外按批次标准时区展示；跨时区承诺（如
+    `2026-11-17T18:00:00-05:00`）先归一化再判定。
+  - 承诺时刻落在非工作日时按基线「节假日偏移」顺延/提前到工作日，**禁止按自然日直接
+    破线**；结果里的 `自然日差_仅展示_不参与判定` 只作对照。
+- 重算引擎 `app/services/baseline_alert.py`
+  - 三档水位：正常 / 即将破线 / 已破线；边界按节假日修正后的承诺时刻与预警余量判定。
+  - 已完成运行的历史判定**冻结保留**，规则换版只重算未完成运行。
+  - 同一关键下游重复扫描只通知一次（`已通知关键下游` 台账），结果按
+    （基线编号, 运行编号）就地更新，不产生重复预警；晚到触发按到达顺序取最新，
+    延迟修正后水位回落并在 `历史判定` 留痕。
+  - 基线停用联动退役未冻结预警（记录保留、`生效标志=false`），重新启用后恢复。
+- 依赖解析 `GET /api/dependency/shared-water-level` 直接读 `baseline_alert`
+  标注关键下游延迟，不另算水位；基线时间线 `GET /api/baseline/timeline`
+  与 `GET /api/baseline/waterline` 读同一份结果，交付时两模块水位与来源结果 id 可核对。
+
+### 基线预警相关接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/baseline/alerts/recompute` | 从承诺时间与依赖触发重算（可带 `baseline_id` 单条重算） |
+| GET | `/api/baseline/alerts` | 分页读取预警结果，支持 `water_level`、`active_only` 过滤 |
+| GET | `/api/baseline/waterline` | 基线管理侧共享水位（同一份结果） |
+| GET | `/api/baseline/timeline` | 基线时间线视图 |
+| GET/POST | `/api/baseline/triggers` | 查看 / 幂等接入依赖触发数据 |
+| GET | `/api/dependency/shared-water-level` | 依赖解析侧共享水位与关键下游延迟标注 |
+
+后端测试：`cd backend && .venv/bin/python -m unittest tests.test_baseline_alert -v`
+
 领域：数据工程
 子方向：数仓与数据湖

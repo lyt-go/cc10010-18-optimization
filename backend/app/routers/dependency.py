@@ -1,4 +1,8 @@
-"""依赖解析接口：维护依赖关系，覆盖提交关系评审、生效关系、解除关系等动作。"""
+"""依赖解析接口：维护依赖关系，覆盖提交关系评审、生效关系、解除关系等动作。
+
+字面量路径（shared-water-level、export）统一声明在 ``/{entry_id}`` 之前，
+避免被路径参数抢占。共享预警水位直接读基线预警结果数据，模块内不另算水位。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+from app.services.baseline_alert import baseline_alert_service
 from app.services.dependency import DependencyService
 
 router = APIRouter(prefix="/api/dependency", tags=["依赖解析"])
@@ -30,15 +35,6 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
-@router.get("/{entry_id}", response_model=dict)
-def get_entry(entry_id: int) -> dict:
-    """读取单条依赖关系明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"依赖关系 {entry_id} 不存在或已归档")
-    return entry
-
-
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条依赖关系，缺字段时说明原因而不是静默丢弃。"""
@@ -46,6 +42,34 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
     return ActionResult(ok=True, message="依赖关系已登记", entry=entry)
+
+
+@router.get("/shared-water-level")
+def shared_water_level() -> dict[str, Any]:
+    """依赖解析侧读取的唯一预警水位：直接取基线预警结果数据，不另算一份。"""
+    items = baseline_alert_service.annotate_dependencies()
+    return {
+        "module": "dependency",
+        "total": len(items),
+        "口径": "工作日规则 + 节假日偏移 + 统一UTC时区，禁止自然日直接破线",
+        "items": items,
+    }
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出依赖解析清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "dependency", "total": total, "items": items}
+
+
+@router.get("/{entry_id}", response_model=dict)
+def get_entry(entry_id: int) -> dict:
+    """读取单条依赖关系明细；不存在时给出可读的错误说明。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"依赖关系 {entry_id} 不存在或已归档")
+    return entry
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,10 +80,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出依赖解析清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "dependency", "total": total, "items": items}

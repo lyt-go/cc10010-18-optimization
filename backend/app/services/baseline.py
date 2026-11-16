@@ -58,4 +58,10 @@ class BaselineService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        # 启用/停用会改变预警参与范围：沿用同一份基线预警结果数据做联动重算，
+        # 延迟导入避免服务模块之间的循环引用。
+        if action in ("启用基线", "停用基线"):
+            from app.services.baseline_alert import baseline_alert_service
+
+            baseline_alert_service.recompute(baseline_id=entry_id)
         return entry, f"基线定义已{action}"

@@ -31,12 +31,23 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>共享预警水位</th>
+          <th>关键下游延迟</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>
+            <span :class="waterClass(row['共享预警水位'])">{{ row['共享预警水位'] ?? '正常' }}</span>
+          </td>
+          <td>
+            <span v-if="row['关键下游延迟']" class="error-text">
+              延迟{{ row['关键下游延迟原因'] ? `（${row['关键下游延迟原因']}）` : '' }}
+            </span>
+            <span v-else>—</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -50,13 +61,14 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无依赖解析数据，可先登记依赖关系</td>
+          <td :colspan="columns.length + 3" class="empty-state">暂无依赖解析数据，可先登记依赖关系</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条依赖解析记录</span>
+      <span class="page-desc">预警水位与基线时间线读取同一份基线预警结果数据（工作日/节假日/统一UTC口径）</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -67,7 +79,7 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | null>
 
 const ENDPOINT = '/api/dependency'
 const columns = ["关系编号", "上游作业", "下游作业", "依赖类型", "偏移量分钟", "触发条件", "等待超时", "跳过标志"]
@@ -80,6 +92,12 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function waterClass(level: unknown): string {
+  if (level === '已破线') return 'error-text'
+  if (level === '即将破线') return 'warn-text'
+  return ''
+}
 
 function resetFilters() {
   filters.value = {}
@@ -114,12 +132,26 @@ async function reload() {
   errorMessage.value = ''
   const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
-      throw new Error('依赖关系列表读取失败')
+    // 列表与共享水位分别读取，水位来自同一份基线预警结果数据
+    const [listResp, waterResp] = await Promise.all([
+      request(`${ENDPOINT}?${query}`),
+      request(`${ENDPOINT}/shared-water-level`),
+    ])
+    if (!listResp.ok) throw new Error('依赖关系列表读取失败')
+    const payload = await listResp.json()
+    const list: Row[] = payload.items ?? []
+
+    const waterMap = new Map<string, Row>()
+    if (waterResp.ok) {
+      const waterPayload = await waterResp.json()
+      for (const item of (waterPayload.items ?? []) as Row[]) {
+        waterMap.set(String(item['下游作业']), item)
+      }
     }
-    const payload = await response.json()
-    rows.value = payload.items ?? []
+    rows.value = list.map((row) => {
+      const shared = waterMap.get(String(row['下游作业']))
+      return shared ? { ...row, ...shared } : row
+    })
     total.value = payload.total ?? rows.value.length
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '依赖解析列表读取失败'
@@ -128,3 +160,10 @@ async function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.warn-text {
+  color: #b8860b;
+  font-weight: 600;
+}
+</style>
